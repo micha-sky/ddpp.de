@@ -1,22 +1,43 @@
-// src/pages/cube-viewer.js
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { graphql, useStaticQuery } from 'gatsby';
 import * as THREE from 'three';
 
 const CubeViewer = () => {
   const containerRef = useRef(null);
+  const [hasPermission, setHasPermission] = useState(false);
+  const [isDeviceOrientationSupported, setIsDeviceOrientationSupported] = useState(false);
 
-  // Query all images from the images folder
   const data = useStaticQuery(graphql`
-      query {
-          allFile(filter: { sourceInstanceName: { eq: "images" }, extension: { regex: "/(jpg|jpeg)/" } }) {
-              nodes {
-                  publicURL
-                  name
-              }
-          }
+    query {
+      allFile(filter: { sourceInstanceName: { eq: "images" }, extension: { regex: "/(jpg|jpeg)/" } }) {
+        nodes {
+          publicURL
+          name
+        }
       }
+    }
   `);
+
+  // Request device orientation permission
+  const requestPermission = async () => {
+    if (typeof DeviceOrientationEvent !== 'undefined' &&
+      typeof DeviceOrientationEvent.requestPermission === 'function') {
+      try {
+        const permission = await DeviceOrientationEvent.requestPermission();
+        setHasPermission(permission === 'granted');
+        setIsDeviceOrientationSupported(true);
+      } catch (error) {
+        console.error('Error requesting device orientation permission:', error);
+        setIsDeviceOrientationSupported(false);
+      }
+    } else if (typeof DeviceOrientationEvent !== 'undefined') {
+      // Device supports orientation but doesn't need permission (e.g., Android)
+      setHasPermission(true);
+      setIsDeviceOrientationSupported(true);
+    } else {
+      setIsDeviceOrientationSupported(false);
+    }
+  };
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -29,6 +50,8 @@ const CubeViewer = () => {
     let isDragging = false;
     let previousTouchX = 0;
     let previousTouchY = 0;
+    let initialAlpha = null;
+    let initialBeta = null;
 
     const init = async () => {
       scene = new THREE.Scene();
@@ -40,10 +63,7 @@ const CubeViewer = () => {
       const geometry = new THREE.BoxGeometry(10, 10, 10);
       geometry.scale(-1, 1, 1);
 
-      // Get the first 6 images from the query result
       const imageUrls = data.allFile.nodes.slice(0, 6).map(node => node.publicURL);
-
-      // Load all textures concurrently
       const texturePromises = imageUrls.map(url => loadTexture(url));
       const textures = await Promise.all(texturePromises);
 
@@ -51,7 +71,6 @@ const CubeViewer = () => {
         new THREE.MeshBasicMaterial({ map: texture })
       );
 
-      // If we don't have enough images, fill with placeholder materials
       while (materials.length < 6) {
         materials.push(new THREE.MeshBasicMaterial({ color: 0x808080 }));
       }
@@ -60,7 +79,6 @@ const CubeViewer = () => {
       scene.add(cube);
       camera.position.set(0, 0, 0);
 
-      // Start animation once everything is loaded
       animate();
     };
 
@@ -74,6 +92,28 @@ const CubeViewer = () => {
       });
     };
 
+    const handleDeviceOrientation = (event) => {
+      if (!hasPermission) return;
+
+      // Initialize reference orientation
+      if (initialAlpha === null || initialBeta === null) {
+        initialAlpha = event.alpha;
+        initialBeta = event.beta;
+        return;
+      }
+
+      // Calculate relative rotation from initial position
+      const deltaAlpha = THREE.MathUtils.degToRad(event.alpha - initialAlpha);
+      const deltaBeta = THREE.MathUtils.degToRad(event.beta - initialBeta);
+
+      // Apply smooth rotation
+      targetRotationY = -deltaAlpha;
+      targetRotationX = -deltaBeta * 0.5; // Reduced sensitivity for comfort
+
+      // Clamp vertical rotation
+      targetRotationX = Math.max(Math.min(targetRotationX, Math.PI / 2), -Math.PI / 2);
+    };
+
     const onWindowResize = () => {
       camera.aspect = window.innerWidth / window.innerHeight;
       camera.updateProjectionMatrix();
@@ -81,6 +121,7 @@ const CubeViewer = () => {
     };
 
     const onScroll = (event) => {
+      if (hasPermission) return; // Disable scroll when using device orientation
       event.preventDefault();
       targetRotationY += event.deltaY * 0.002;
       targetRotationX += event.deltaX * 0.002;
@@ -88,6 +129,7 @@ const CubeViewer = () => {
     };
 
     const onTouchStart = (event) => {
+      if (hasPermission) return; // Disable touch when using device orientation
       event.preventDefault();
       isDragging = true;
       const touch = event.touches[0];
@@ -96,7 +138,7 @@ const CubeViewer = () => {
     };
 
     const onTouchMove = (event) => {
-      if (!isDragging) return;
+      if (!isDragging || hasPermission) return;
       event.preventDefault();
 
       const touch = event.touches[0];
@@ -131,18 +173,20 @@ const CubeViewer = () => {
     };
 
     init();
+    requestPermission();
 
     // Event listeners
     window.addEventListener('resize', onWindowResize, false);
     window.addEventListener('wheel', onScroll, { passive: false });
+    window.addEventListener('deviceorientation', handleDeviceOrientation, false);
     containerRef.current.addEventListener('touchstart', onTouchStart, { passive: false });
     containerRef.current.addEventListener('touchmove', onTouchMove, { passive: false });
     containerRef.current.addEventListener('touchend', onTouchEnd, false);
 
-    // Cleanup
     return () => {
       window.removeEventListener('resize', onWindowResize);
       window.removeEventListener('wheel', onScroll);
+      window.removeEventListener('deviceorientation', handleDeviceOrientation);
       containerRef.current?.removeEventListener('touchstart', onTouchStart);
       containerRef.current?.removeEventListener('touchmove', onTouchMove);
       containerRef.current?.removeEventListener('touchend', onTouchEnd);
@@ -156,17 +200,39 @@ const CubeViewer = () => {
       scene?.dispose();
       renderer?.dispose();
     };
-  }, [data]);
+  }, [data, hasPermission]);
 
   return (
-    <div
-      ref={containerRef}
-      style={{
-        width: '100vw',
-        height: '100vh',
-        overflow: 'hidden',
-      }}
-    />
+    <div>
+      {isDeviceOrientationSupported && !hasPermission && (
+        <button
+          onClick={requestPermission}
+          style={{
+            position: 'absolute',
+            top: '20px',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 1000,
+            padding: '10px 20px',
+            backgroundColor: '#007bff',
+            color: 'white',
+            border: 'none',
+            borderRadius: '5px',
+            cursor: 'pointer'
+          }}
+        >
+          Enable Device Orientation
+        </button>
+      )}
+      <div
+        ref={containerRef}
+        style={{
+          width: '100vw',
+          height: '100vh',
+          overflow: 'hidden',
+        }}
+      />
+    </div>
   );
 };
 
